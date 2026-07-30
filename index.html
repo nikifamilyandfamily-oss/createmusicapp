@@ -749,8 +749,16 @@ const MP3Codec = {
     if (typeof lamejs === 'undefined') throw new Error('Библиотека LAME не загружена');
     const numCh = Math.min(2, buffer.numberOfChannels);
     const sr = buffer.sampleRate;
-    const kbps = 320; // Максимальное качество MP3
-    const mp3encoder = new lamejs.Mp3Encoder(numCh, sr, kbps);
+
+    const mp3encoder = new lamejs.Mp3Encoder(numCh, sr, 320);
+    try {
+      if (mp3encoder.gfp) {
+        mp3encoder.gfp.VBR = 4;
+        mp3encoder.gfp.VBR_quality = 0;
+        mp3encoder.gfp.VBR_min_bitrate_kbps = 128;
+        mp3encoder.gfp.VBR_max_bitrate_kbps = 320;
+      }
+    } catch (e) {}
 
     const samplesL = buffer.getChannelData(0);
     const samplesR = numCh > 1 ? buffer.getChannelData(1) : samplesL;
