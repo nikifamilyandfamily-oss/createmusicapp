@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
   :root {
@@ -749,16 +750,8 @@ const MP3Codec = {
     if (typeof lamejs === 'undefined') throw new Error('Библиотека LAME не загружена');
     const numCh = Math.min(2, buffer.numberOfChannels);
     const sr = buffer.sampleRate;
-
-    const mp3encoder = new lamejs.Mp3Encoder(numCh, sr, 320);
-    try {
-      if (mp3encoder.gfp) {
-        mp3encoder.gfp.VBR = 4;
-        mp3encoder.gfp.VBR_quality = 0;
-        mp3encoder.gfp.VBR_min_bitrate_kbps = 128;
-        mp3encoder.gfp.VBR_max_bitrate_kbps = 320;
-      }
-    } catch (e) {}
+    const kbps = 320;
+    const mp3encoder = new lamejs.Mp3Encoder(numCh, sr, kbps);
 
     const samplesL = buffer.getChannelData(0);
     const samplesR = numCh > 1 ? buffer.getChannelData(1) : samplesL;
@@ -799,10 +792,28 @@ const MP3Codec = {
     let totalLength = 0;
     for (const chunk of mp3Data) totalLength += chunk.length;
 
-    const enc = new TextEncoder();
-    const startStr = "SONIC_GENOME_GRAPH_START";
-    const endStr = "SONIC_GENOME_GRAPH_END";
-    const suffix = graphJson ? enc.encode(startStr + graphJson + endStr) : null;
+    // Сжимаем граф gzip'ом (pako) — реальный источник лишнего веса был здесь,
+    // а не в битрейте аудио. JSON с повторяющимися снапшотами сжимается в разы.
+    let suffix = null;
+    if (graphJson && typeof pako !== 'undefined') {
+      const compressed = pako.deflate(graphJson);
+      const startStr = "SONIC_GENOME_GRAPH_GZ_START";
+      const endStr = "SONIC_GENOME_GRAPH_GZ_END";
+      const enc = new TextEncoder();
+      const startBytes = enc.encode(startStr);
+      const endBytes = enc.encode(endStr);
+      const lenBytes = new Uint8Array(4);
+      new DataView(lenBytes.buffer).setUint32(0, compressed.length, true);
+      suffix = new Uint8Array(startBytes.length + 4 + compressed.length + endBytes.length);
+      let o = 0;
+      suffix.set(startBytes, o); o += startBytes.length;
+      suffix.set(lenBytes, o); o += 4;
+      suffix.set(compressed, o); o += compressed.length;
+      suffix.set(endBytes, o);
+    } else if (graphJson) {
+      const enc = new TextEncoder();
+      suffix = enc.encode("SONIC_GENOME_GRAPH_START" + graphJson + "SONIC_GENOME_GRAPH_END");
+    }
     if (suffix) totalLength += suffix.length;
 
     const result = new Uint8Array(totalLength);
@@ -811,15 +822,37 @@ const MP3Codec = {
       result.set(chunk, offset);
       offset += chunk.length;
     }
-    if (suffix) {
-      result.set(suffix, offset);
-    }
+    if (suffix) result.set(suffix, offset);
 
     return new Blob([result], { type: 'audio/mpeg' });
   },
 
   decodeGraph(arrayBuffer) {
     try {
+      const bytes = new Uint8Array(arrayBuffer);
+      const enc = new TextEncoder();
+      const startMarkerGz = enc.encode("SONIC_GENOME_GRAPH_GZ_START");
+      const endMarkerGz = "SONIC_GENOME_GRAPH_GZ_END";
+
+      const findSeq = (haystack, needle, from = 0) => {
+        outer: for (let i = from; i <= haystack.length - needle.length; i++) {
+          for (let j = 0; j < needle.length; j++) if (haystack[i + j] !== needle[j]) continue outer;
+          return i;
+        }
+        return -1;
+      };
+
+      const gzStart = findSeq(bytes, startMarkerGz);
+      if (gzStart !== -1 && typeof pako !== 'undefined') {
+        const lenOffset = gzStart + startMarkerGz.length;
+        const len = new DataView(bytes.buffer, bytes.byteOffset + lenOffset, 4).getUint32(0, true);
+        const dataOffset = lenOffset + 4;
+        const compressed = bytes.subarray(dataOffset, dataOffset + len);
+        const jsonStr = pako.inflate(compressed, { to: 'string' });
+        return jsonStr;
+      }
+
+      // Фолбэк на старый несжатый формат (для файлов, сохранённых ранее)
       const text = new TextDecoder("utf-8").decode(arrayBuffer);
       const startStr = "SONIC_GENOME_GRAPH_START";
       const endStr = "SONIC_GENOME_GRAPH_END";
