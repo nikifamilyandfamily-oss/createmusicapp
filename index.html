@@ -1561,16 +1561,17 @@ class App {
     try {
       const buf = await this.audio.renderMainPath(renderEvents, totalDuration);
       const graphData = {
-        version: 1, createdAt: Date.now(),
-        branches: Array.from(this.branches.values()).map(br => ({
-          id: br.id, parentId: br.parentId, parentNodeId: br.parentNodeId,
-          engineSnap: br.engine.snapshot(),
-          nodes: br.nodes.map(n => ({ id: n.id, tickIndex: n.tickIndex, x: n.x, y: n.y, color: n.color, size: n.size, engineSnap: n.engineSnap, events: n.events, audioTime: n.audioTime })),
-          startX: br.startX, startY: br.startY, angle: br.angle, isMainPath: br.isMainPath, curvePhase: br.curvePhase, curveSpeed: br.curveSpeed, curveAmp: br.curveAmp,
-        })),
-        currentBranchId: this.currentBranch ? this.currentBranch.id : null,
-        currentTickIndex: this.tickIndex, camera: this.renderer.camera,
-      };
+      version: 1, createdAt: Date.now(),
+      branches: Array.from(this.branches.values()).map(br => ({
+        id: br.id, parentId: br.parentId, parentNodeId: br.parentNodeId,
+        engineSnap: br.engine.snapshot(),
+        // ОПТИМИЗАЦИЯ: сохраняем только состояние генератора, а не весь движок
+        nodes: br.nodes.map(n => ({ id: n.id, tickIndex: n.tickIndex, x: n.x, y: n.y, color: n.color, size: n.size, rngState: n.engineSnap.rngState, events: n.events, audioTime: n.audioTime })),
+        startX: br.startX, startY: br.startY, angle: br.angle, isMainPath: br.isMainPath, curvePhase: br.curvePhase, curveSpeed: br.curveSpeed, curveAmp: br.curveAmp,
+      })),
+      currentBranchId: this.currentBranch ? this.currentBranch.id : null,
+      currentTickIndex: this.tickIndex, camera: this.renderer.camera,
+    };
       
       const blob = MP3Codec.encode(buf, JSON.stringify(graphData));
       const url = URL.createObjectURL(blob); const a = document.createElement('a');
@@ -1622,10 +1623,15 @@ class App {
     this.segmentNodes = []; this.renderer.segmentNodes = [];
     document.getElementById('selection-card').classList.remove('visible');
 
-    for (const bd of data.branches) {
+        for (const bd of data.branches) {
       const engine = new GenerativeEngine(bd.engineSnap.seed); engine.restoreSnapshot(bd.engineSnap);
       const br = new Branch({ id: bd.id, parentId: bd.parentId, parentNodeId: bd.parentNodeId, engine, startX: bd.startX, startY: bd.startY, angle: bd.angle, isMainPath: bd.isMainPath, curvePhase: bd.curvePhase, curveSpeed: bd.curveSpeed, curveAmp: bd.curveAmp });
-      for (const nd of bd.nodes) br.nodes.push(new TrailNode({ id: nd.id, branchId: br.id, tickIndex: nd.tickIndex, x: nd.x, y: nd.y, color: nd.color, size: nd.size, engineSnap: nd.engineSnap, events: nd.events, audioTime: nd.audioTime, bornAt: performance.now() - 1000 }));
+      for (const nd of bd.nodes) {
+        // Восстанавливаем engineSnap из настроек ветки + состояния ноды
+        // (поддержка старых файлов, где был engineSnap целиком)
+        const nodeEngineSnap = nd.engineSnap ? nd.engineSnap : { ...bd.engineSnap, rngState: nd.rngState };
+        br.nodes.push(new TrailNode({ id: nd.id, branchId: br.id, tickIndex: nd.tickIndex, x: nd.x, y: nd.y, color: nd.color, size: nd.size, engineSnap: nodeEngineSnap, events: nd.events, audioTime: nd.audioTime, bornAt: performance.now() - 1000 }));
+      }
       this.branches.set(br.id, br); this.renderer.addBranch(br);
     }
 
