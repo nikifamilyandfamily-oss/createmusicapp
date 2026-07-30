@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
   :root {
     --bg-0: #050510; --bg-1: #0a0a1a; --fg: #ecedf6; --muted: #6c6c8c;
@@ -117,8 +118,8 @@
     <div class="toolbar">
       <button class="btn" id="btn-reset">Новый мир</button>
       <button class="btn" id="btn-load">Загрузить</button>
-      <button class="btn" id="btn-save">Сохранить WAV</button>
-      <input type="file" id="file-input" accept=".wav,audio/wav">
+      <button class="btn" id="btn-save">Сохранить MP3</button>
+      <input type="file" id="file-input" accept=".wav,.mp3,audio/wav,audio/mpeg">
     </div>
   </header>
 
@@ -164,7 +165,7 @@
 
   <div class="modal-overlay" id="modal-load">
     <div class="modal">
-      <h2>WAV содержит геном сессии</h2>
+      <h2>Аудио содержит геном сессии</h2>
       <p>В этом файле есть данные графа ветвлений. Можно продолжить с последней активной ветки или начать совершенно новый мир, используя этот файл как отправную точку.</p>
       <div class="modal-actions">
         <button class="btn" id="modal-new">Новый мир</button>
@@ -175,7 +176,7 @@
 
   <div class="modal-overlay" id="modal-nograph">
     <div class="modal">
-      <h2>WAV без графа</h2>
+      <h2>Аудио без графа</h2>
       <p>В этом файле нет данных генома. Можно только слушать его или начать новый мир с нуля.</p>
       <div class="modal-actions">
         <button class="btn" id="modal-nograph-close">Закрыть</button>
@@ -276,7 +277,6 @@ class GenerativeEngine {
     this.saturationBase = 60 + r.int(0, 30);
     this.lightnessBase = 55 + r.int(0, 15);
     const dir = r.chance(0.5) ? 1 : -1;
-    // Сделаны углы чуть меньше для визуальной близости веток
     this.branchAngleOffset = dir * (Math.PI * 0.2 + r.next() * Math.PI * 0.35);
     this.curvature = 0.3 + r.next() * 0.8;
     this.stepSize = 7 + r.next() * 9;
@@ -348,7 +348,6 @@ class GenerativeEngine {
     eng.saturationBase = Math.max(40, Math.min(95, p.saturationBase + r.int(-15, 15)));
     eng.lightnessBase = Math.max(40, Math.min(78, p.lightnessBase + r.int(-10, 10)));
     const dir = r.chance(0.5) ? 1 : -1;
-    // Уменьшенный угол для дочерних веток
     eng.branchAngleOffset = dir * (Math.PI * 0.2 + r.next() * Math.PI * 0.35);
     eng.curvature = 0.3 + r.next() * 0.8;
     eng.stepSize = 7 + r.next() * 9;
@@ -745,6 +744,88 @@ const WAVCodec = {
   }
 };
 
+const MP3Codec = {
+  encode(buffer, graphJson) {
+    if (typeof lamejs === 'undefined') throw new Error('Библиотека LAME не загружена');
+    const numCh = Math.min(2, buffer.numberOfChannels);
+    const sr = buffer.sampleRate;
+    const kbps = 320; // Максимальное качество MP3
+    const mp3encoder = new lamejs.Mp3Encoder(numCh, sr, kbps);
+
+    const samplesL = buffer.getChannelData(0);
+    const samplesR = numCh > 1 ? buffer.getChannelData(1) : samplesL;
+
+    const sampleBlockSize = 1152;
+    const mp3Data = [];
+
+    const convert = (f32) => {
+      const i16 = new Int16Array(f32.length);
+      for (let i = 0; i < f32.length; i++) {
+        let s = Math.max(-1, Math.min(1, f32[i]));
+        i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      return i16;
+    };
+
+    const int16L = convert(samplesL);
+
+    if (numCh === 1) {
+      for (let i = 0; i < int16L.length; i += sampleBlockSize) {
+        const chunk = int16L.subarray(i, i + sampleBlockSize);
+        const mp3buf = mp3encoder.encodeBuffer(chunk);
+        if (mp3buf.length > 0) mp3Data.push(mp3buf);
+      }
+    } else {
+      const int16R = convert(samplesR);
+      for (let i = 0; i < int16L.length; i += sampleBlockSize) {
+        const chunkL = int16L.subarray(i, i + sampleBlockSize);
+        const chunkR = int16R.subarray(i, i + sampleBlockSize);
+        const mp3buf = mp3encoder.encodeBuffer(chunkL, chunkR);
+        if (mp3buf.length > 0) mp3Data.push(mp3buf);
+      }
+    }
+
+    const end = mp3encoder.flush();
+    if (end.length > 0) mp3Data.push(end);
+
+    let totalLength = 0;
+    for (const chunk of mp3Data) totalLength += chunk.length;
+
+    const enc = new TextEncoder();
+    const startStr = "SONIC_GENOME_GRAPH_START";
+    const endStr = "SONIC_GENOME_GRAPH_END";
+    const suffix = graphJson ? enc.encode(startStr + graphJson + endStr) : null;
+    if (suffix) totalLength += suffix.length;
+
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of mp3Data) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+    if (suffix) {
+      result.set(suffix, offset);
+    }
+
+    return new Blob([result], { type: 'audio/mpeg' });
+  },
+
+  decodeGraph(arrayBuffer) {
+    try {
+      const text = new TextDecoder("utf-8").decode(arrayBuffer);
+      const startStr = "SONIC_GENOME_GRAPH_START";
+      const endStr = "SONIC_GENOME_GRAPH_END";
+      const startIdx = text.indexOf(startStr);
+      if (startIdx === -1) return null;
+      const endIdx = text.indexOf(endStr, startIdx);
+      if (endIdx === -1) return null;
+      return text.substring(startIdx + startStr.length, endIdx);
+    } catch (e) {
+      return null;
+    }
+  }
+};
+
 class TrailNode {
   constructor(opts) {
     this.id = opts.id; this.branchId = opts.branchId; this.tickIndex = opts.tickIndex;
@@ -1031,9 +1112,9 @@ class App {
   bindUI() {
     document.getElementById('btn-play-main').addEventListener('click', () => this.togglePlay());
     document.getElementById('btn-reset').addEventListener('click', () => this.confirmReset());
-    document.getElementById('btn-save').addEventListener('click', () => this.saveWav());
+    document.getElementById('btn-save').addEventListener('click', () => this.saveAudio());
     document.getElementById('btn-load').addEventListener('click', () => document.getElementById('file-input').click());
-    document.getElementById('file-input').addEventListener('change', e => this.loadWav(e));
+    document.getElementById('file-input').addEventListener('change', e => this.loadAudio(e));
     document.getElementById('sel-branch').addEventListener('click', () => this.branchFromSelected());
     document.getElementById('sel-continue').addEventListener('click', () => this.continueOnSameBranch());
     document.getElementById('sel-preview').addEventListener('click', () => this.previewFragment());
@@ -1239,7 +1320,6 @@ class App {
     const startTick = this.segmentNodes[0].tickIndex;
     const removedCount = this.segmentNodes.length;
 
-    // 1. Найти и удалить все ветки, которые начинались с удаляемых узлов
     const deletedNodeIds = new Set(this.segmentNodes.map(n => n.id));
     const branchesToDelete = [];
     for (const c of this.branches.values()) {
@@ -1250,15 +1330,12 @@ class App {
       for (const dId of toDelete) { this.branches.delete(dId); this.renderer.branches.delete(dId); }
     }
 
-    // 2. Вырезать узлы из ветки
     br.nodes.splice(startTick, removedCount);
 
-    // 3. Пересчитать индексы тиков для оставшихся узлов
     for (let i = startTick; i < br.nodes.length; i++) {
       br.nodes[i].tickIndex = i;
     }
 
-    // 4. Если удаляли из текущей ветки, скорректировать указатель воспроизведения
     if (br.id === this.currentBranch.id) {
       if (this.tickIndex > startTick + removedCount - 1) {
         this.tickIndex -= removedCount;
@@ -1295,16 +1372,12 @@ class App {
 
     if (stitch) {
       if (parentNode) {
-        // Находим все дочерние ветки от br
         const childrenOfBr = Array.from(this.branches.values()).filter(c => c.parentId === br.id);
         for (const child of childrenOfBr) {
-          // Находим узел в br, от которого отпочковалась child
           const childParentNodeInBr = br.nodes.find(n => n.id === child.parentNodeId);
           if (childParentNodeInBr) {
-            // Вектор смещения до нового родительского узла
             const dx = parentNode.x - childParentNodeInBr.x;
             const dy = parentNode.y - childParentNodeInBr.y;
-            // Перенос всей геометрии поддерева
             const subTreeIds = [child.id, ...this.getDescendants(child.id)];
             for (const sId of subTreeIds) {
               const sBranch = this.branches.get(sId);
@@ -1313,7 +1386,6 @@ class App {
                 for (const n of sBranch.nodes) { n.x += dx; n.y += dy; }
               }
             }
-            // Перепривязка child к parentBranch
             child.parentId = parentBranch.id;
             child.parentNodeId = parentNode.id;
           }
@@ -1330,7 +1402,6 @@ class App {
       this.toast(`Удалено веток: ${toDelete.length}`, 'accent');
     }
 
-    // Если текущая активная ветка оказалась удалена
     if (!this.branches.has(this.currentBranch.id)) {
       if (parentBranch) {
         this.currentBranch = parentBranch;
@@ -1362,7 +1433,6 @@ class App {
 
     const parentAngleAtNode = parentBranch.angle;
     const newAngle = parentAngleAtNode + newEngine.branchAngleOffset;
-    // Уменьшено смещение для визуальной близости
     const offX = Math.cos(newAngle) * 8; 
     const offY = Math.sin(newAngle) * 8;
 
@@ -1432,10 +1502,10 @@ class App {
   openModal(id) { document.getElementById(id).classList.add('visible'); }
   closeModal(id) { document.getElementById(id).classList.remove('visible'); }
 
-  async saveWav() {
+  async saveAudio() {
     const path = this.computeMainPath();
     if (path.length === 0 || (path.length === 1 && path[0].toTick === 0)) { this.toast('Main path пуст. Сыграйте что-нибудь сначала.', 'warn'); return; }
-    this.toast('Рендеринг WAV...', 'accent');
+    this.toast('Рендеринг MP3 (320 kbps)...', 'accent');
     let currentTime = 0.3; const renderEvents = []; let totalTicks = 0;
     for (const seg of path) {
       const br = this.branches.get(seg.branchId); if (!br) continue;
@@ -1460,21 +1530,38 @@ class App {
         currentBranchId: this.currentBranch ? this.currentBranch.id : null,
         currentTickIndex: this.tickIndex, camera: this.renderer.camera,
       };
-      const blob = WAVCodec.encode(buf, JSON.stringify(graphData));
+      
+      const blob = MP3Codec.encode(buf, JSON.stringify(graphData));
       const url = URL.createObjectURL(blob); const a = document.createElement('a');
-      a.href = url; a.download = `sonic-genome-${Date.now()}.wav`;
+      a.href = url; a.download = `sonic-genome-${Date.now()}.mp3`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       const m = Math.floor(totalDuration / 60), s = Math.floor(totalDuration % 60);
-      this.toast(`WAV сохранён · ${m}:${s.toString().padStart(2,'0')} · ${totalTicks} тиков`, 'accent');
+      this.toast(`MP3 сохранён · ${m}:${s.toString().padStart(2,'0')} · ${totalTicks} тиков`, 'accent');
     } catch (e) { this.toast('Ошибка рендера: ' + e.message, 'warn'); console.error(e); }
   }
 
-  async loadWav(event) {
+  async loadAudio(event) {
     const file = event.target.files[0]; if (!file) return; event.target.value = '';
     try {
-      const ab = await file.arrayBuffer(); const decoded = WAVCodec.decode(ab); this._pendingLoad = decoded;
-      if (decoded.graphJson) this.openModal('modal-load'); else this.openModal('modal-nograph');
+      const ab = await file.arrayBuffer();
+      const view = new DataView(ab);
+      let isWav = false;
+      if (ab.byteLength > 12) {
+        let riff = ''; for(let i=0; i<4; i++) riff += String.fromCharCode(view.getUint8(i));
+        if (riff === 'RIFF') isWav = true;
+      }
+
+      if (isWav) {
+        const decoded = WAVCodec.decode(ab);
+        this._pendingLoad = decoded;
+        if (decoded.graphJson) this.openModal('modal-load'); else this.openModal('modal-nograph');
+      } else {
+        // Предполагаем MP3 или другой аудио формат, ищем данные графа
+        const graphJson = MP3Codec.decodeGraph(ab);
+        this._pendingLoad = { fmt: null, audioData: null, graphJson, arrayBuffer: ab };
+        if (graphJson) this.openModal('modal-load'); else this.openModal('modal-nograph');
+      }
     } catch (e) { this.toast('Ошибка чтения: ' + e.message, 'warn'); }
   }
 
